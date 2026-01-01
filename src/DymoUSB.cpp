@@ -1,5 +1,40 @@
 #include "DymoUSB.h"
 #include "config.h"
+#include <Adafruit_GFX.h>
+#include <Fonts/FreeSans9pt7b.h>
+#include <Fonts/FreeSans12pt7b.h>
+#include <Fonts/FreeSans18pt7b.h>
+#include <Fonts/FreeSans24pt7b.h>
+#include "qrcode.h"
+
+// Custom GFX canvas for monochrome bitmap
+class MonoBitmap : public Adafruit_GFX {
+public:
+    MonoBitmap(uint16_t w, uint16_t h) : Adafruit_GFX(w, h) {
+        _width = w;
+        _height = h;
+        _buffer.resize((w / 8) * h, 0);
+    }
+
+    void drawPixel(int16_t x, int16_t y, uint16_t color) override {
+        if (x < 0 || x >= _width || y < 0 || y >= _height) return;
+
+        int byteIndex = y * (_width / 8) + (x / 8);
+        int bitIndex = 7 - (x % 8);
+
+        if (color) {
+            _buffer[byteIndex] |= (1 << bitIndex);
+        } else {
+            _buffer[byteIndex] &= ~(1 << bitIndex);
+        }
+    }
+
+    std::vector<uint8_t>& getBuffer() { return _buffer; }
+    void clear() { std::fill(_buffer.begin(), _buffer.end(), 0); }
+
+private:
+    std::vector<uint8_t> _buffer;
+};
 
 DymoUSB::DymoUSB() : _connected(false), _printing(false),
                      _tapeWidth(DYMO_DEFAULT_TAPE_WIDTH), _dotTab(0) {
@@ -356,68 +391,245 @@ bool DymoUSB::sendImage(const uint8_t* imageData, int width, int height) {
 // ============================================================================
 
 std::vector<uint8_t> DymoUSB::textToImage(const String& text, int fontSize, const String& align) {
-    // TODO: Implement text rendering to bitmap
-    // This would use a font library (e.g., Adafruit GFX, U8g2, or custom font)
-
     #if DEBUG_SERIAL
-    Serial.println("[DYMO] Text rendering not yet implemented - returning placeholder");
+    Serial.printf("[DYMO] Rendering text: '%s' (size: %d, align: %s)\n",
+                  text.c_str(), fontSize, align.c_str());
     #endif
 
-    // Return placeholder: simple pattern for testing
-    int height = fontSize * 3;
-    int bytesPerLine = calculatePixelHeight() / 8;
-    std::vector<uint8_t> bitmap(bytesPerLine * height, 0x00);
+    // Calculate tape dimensions
+    int tapeHeight = calculatePixelHeight();
+    int maxLabelLength = 500;  // Reasonable max length
 
-    // Create simple pattern
-    for (int i = 0; i < height; i++) {
-        for (int j = 0; j < bytesPerLine; j++) {
-            bitmap[i * bytesPerLine + j] = (i % 4 == 0) ? 0xFF : 0x00;
+    // Create bitmap canvas
+    MonoBitmap canvas(tapeHeight, maxLabelLength);
+    canvas.clear();
+    canvas.setRotation(0);
+    canvas.setTextWrap(false);
+    canvas.setTextColor(1);  // Black text
+
+    // Select font based on size
+    const GFXfont* font = nullptr;
+    if (fontSize <= 9) {
+        font = &FreeSans9pt7b;
+    } else if (fontSize <= 12) {
+        font = &FreeSans12pt7b;
+    } else if (fontSize <= 18) {
+        font = &FreeSans18pt7b;
+    } else {
+        font = &FreeSans24pt7b;
+    }
+    canvas.setFont(font);
+
+    // Get text bounds
+    int16_t x1, y1;
+    uint16_t w, h;
+    canvas.getTextBounds(text.c_str(), 0, 0, &x1, &y1, &w, &h);
+
+    // Calculate position based on alignment
+    int16_t x = 2;  // Small left margin
+    int16_t y = h + 2;  // Baseline position
+
+    if (align == "center") {
+        x = (tapeHeight - w) / 2;
+    } else if (align == "right") {
+        x = tapeHeight - w - 2;
+    }
+
+    // Ensure text fits
+    if (x < 0) x = 2;
+
+    // Draw text
+    canvas.setCursor(x, y);
+    canvas.print(text);
+
+    // Calculate actual used height
+    int usedHeight = h + 10;  // Text height plus margins
+
+    // Rotate 90 degrees for label orientation
+    // DYMO labels print with text rotated 90° from tape feed direction
+    std::vector<uint8_t> rotated((tapeHeight / 8) * usedHeight, 0);
+
+    for (int y = 0; y < usedHeight; y++) {
+        for (int x = 0; x < tapeHeight; x++) {
+            int srcByteIdx = y * (tapeHeight / 8) + (x / 8);
+            int srcBitIdx = 7 - (x % 8);
+
+            if (canvas.getBuffer()[srcByteIdx] & (1 << srcBitIdx)) {
+                int dstX = tapeHeight - 1 - x;
+                int dstY = y;
+                int dstByteIdx = dstY * (tapeHeight / 8) + (dstX / 8);
+                int dstBitIdx = 7 - (dstX % 8);
+                rotated[dstByteIdx] |= (1 << dstBitIdx);
+            }
         }
     }
 
-    return bitmap;
+    #if DEBUG_SERIAL
+    Serial.printf("[DYMO] Text rendered: %dx%d pixels\n", tapeHeight, usedHeight);
+    #endif
+
+    return rotated;
 }
 
 std::vector<uint8_t> DymoUSB::qrToImage(const String& data, int size) {
-    // TODO: Implement QR code generation
-    // Would use qrcode library: https://github.com/ricmoo/QRCode
-
     #if DEBUG_SERIAL
-    Serial.println("[DYMO] QR code generation not yet implemented - returning placeholder");
+    Serial.printf("[DYMO] Generating QR code: '%s' (size: %d)\n", data.c_str(), size);
     #endif
 
-    int qrSize = size * 21;  // QR codes are 21x21 modules minimum
-    int bytesPerLine = calculatePixelHeight() / 8;
-    std::vector<uint8_t> bitmap(bytesPerLine * qrSize, 0x00);
+    // Create QR code
+    QRCode qrcode;
+    uint8_t qrcodeData[qrcode_getBufferSize(size + 2)];  // Size 3-5 recommended
 
-    // Placeholder pattern
-    for (int i = 0; i < qrSize; i++) {
-        for (int j = 0; j < bytesPerLine; j++) {
-            bitmap[i * bytesPerLine + j] = (i + j) % 2 ? 0xAA : 0x55;
+    qrcode_initText(&qrcode, qrcodeData, size + 2, ECC_LOW, data.c_str());
+
+    int qrPixelSize = qrcode.size;
+    int scale = 3;  // Scale each module to 3x3 pixels for readability
+    int scaledSize = qrPixelSize * scale;
+    int tapeHeight = calculatePixelHeight();
+
+    // Add margin
+    int margin = 4;
+    int totalSize = scaledSize + (margin * 2);
+
+    // Create bitmap
+    std::vector<uint8_t> bitmap((tapeHeight / 8) * totalSize, 0xFF);  // White background
+
+    // Center QR code on tape
+    int offsetX = (tapeHeight - scaledSize) / 2;
+    int offsetY = margin;
+
+    // Draw QR code
+    for (int y = 0; y < qrPixelSize; y++) {
+        for (int x = 0; x < qrPixelSize; x++) {
+            bool module = qrcode_getModule(&qrcode, x, y);
+
+            if (module) {  // Black module
+                // Scale up
+                for (int sy = 0; sy < scale; sy++) {
+                    for (int sx = 0; sx < scale; sx++) {
+                        int pixelX = offsetX + (x * scale) + sx;
+                        int pixelY = offsetY + (y * scale) + sy;
+
+                        if (pixelX >= 0 && pixelX < tapeHeight && pixelY >= 0 && pixelY < totalSize) {
+                            int byteIdx = pixelY * (tapeHeight / 8) + (pixelX / 8);
+                            int bitIdx = 7 - (pixelX % 8);
+                            bitmap[byteIdx] &= ~(1 << bitIdx);  // Set to black
+                        }
+                    }
+                }
+            }
         }
     }
+
+    #if DEBUG_SERIAL
+    Serial.printf("[DYMO] QR code generated: %dx%d modules, %dx%d pixels\n",
+                  qrPixelSize, qrPixelSize, scaledSize, scaledSize);
+    #endif
 
     return bitmap;
 }
 
 std::vector<uint8_t> DymoUSB::barcodeToImage(const String& data, const String& type) {
-    // TODO: Implement barcode generation
-    // Could use libraries for Code128, Code39, EAN13, etc.
-
     #if DEBUG_SERIAL
-    Serial.println("[DYMO] Barcode generation not yet implemented - returning placeholder");
+    Serial.printf("[DYMO] Generating barcode: '%s' (type: %s)\n", data.c_str(), type.c_str());
     #endif
 
-    int height = 50;
-    int bytesPerLine = calculatePixelHeight() / 8;
-    std::vector<uint8_t> bitmap(bytesPerLine * height, 0x00);
+    int tapeHeight = calculatePixelHeight();
+    int barcodeHeight = 40;
+    int textHeight = 15;
+    int totalHeight = barcodeHeight + textHeight + 10;
 
-    // Placeholder barcode pattern (vertical stripes)
-    for (int i = 0; i < height; i++) {
-        for (int j = 0; j < bytesPerLine; j++) {
-            bitmap[i * bytesPerLine + j] = (j % 2) ? 0xFF : 0x00;
+    // Create bitmap
+    std::vector<uint8_t> bitmap((tapeHeight / 8) * totalHeight, 0xFF);  // White background
+
+    // Simple Code 39 implementation (basic barcode)
+    // For production, integrate a proper barcode library
+
+    // Code 39 encoding (simplified - only supports numbers and uppercase)
+    const char* code39[] = {
+        "000110100",  // 0
+        "100100001",  // 1
+        "001100001",  // 2
+        "101100000",  // 3
+        "000110001",  // 4
+        "100110000",  // 5
+        "001110000",  // 6
+        "000100101",  // 7
+        "100100100",  // 8
+        "001100100"   // 9
+    };
+
+    int barWidth = 2;  // Width of narrow bar
+    int wideWidth = 5;  // Width of wide bar
+    int currentX = 10;  // Start position
+
+    // Start character (*)
+    currentX += 20;
+
+    // Encode data
+    for (size_t i = 0; i < data.length() && currentX < tapeHeight - 30; i++) {
+        char c = data[i];
+        int idx = -1;
+
+        if (c >= '0' && c <= '9') {
+            idx = c - '0';
+        }
+
+        if (idx >= 0) {
+            const char* pattern = code39[idx];
+
+            for (int j = 0; j < 9; j++) {
+                int width = (pattern[j] == '1') ? wideWidth : barWidth;
+                bool isBlack = (j % 2 == 0);
+
+                // Draw bar
+                for (int w = 0; w < width && currentX < tapeHeight; w++) {
+                    for (int h = 5; h < barcodeHeight + 5; h++) {
+                        if (isBlack) {
+                            int byteIdx = h * (tapeHeight / 8) + (currentX / 8);
+                            int bitIdx = 7 - (currentX % 8);
+                            bitmap[byteIdx] &= ~(1 << bitIdx);  // Black
+                        }
+                    }
+                    currentX++;
+                }
+            }
+            currentX += barWidth;  // Inter-character gap
         }
     }
+
+    // Add text below barcode using simple rendering
+    MonoBitmap textCanvas(tapeHeight, textHeight);
+    textCanvas.clear();
+    textCanvas.setTextSize(1);
+    textCanvas.setTextColor(1);
+
+    // Center text
+    int textX = (tapeHeight - (data.length() * 6)) / 2;
+    if (textX < 0) textX = 2;
+
+    textCanvas.setCursor(textX, 2);
+    textCanvas.print(data);
+
+    // Copy text to barcode bitmap
+    for (int y = 0; y < textHeight; y++) {
+        for (int x = 0; x < tapeHeight; x++) {
+            int srcByteIdx = y * (tapeHeight / 8) + (x / 8);
+            int srcBitIdx = 7 - (x % 8);
+
+            if (textCanvas.getBuffer()[srcByteIdx] & (1 << srcBitIdx)) {
+                int dstY = barcodeHeight + 5 + y;
+                int dstByteIdx = dstY * (tapeHeight / 8) + (x / 8);
+                int dstBitIdx = 7 - (x % 8);
+                bitmap[dstByteIdx] &= ~(1 << dstBitIdx);  // Black text
+            }
+        }
+    }
+
+    #if DEBUG_SERIAL
+    Serial.printf("[DYMO] Barcode generated: %dx%d pixels\n", tapeHeight, totalHeight);
+    Serial.println("[DYMO] Note: Using simplified Code 39 - integrate full barcode library for production");
+    #endif
 
     return bitmap;
 }
