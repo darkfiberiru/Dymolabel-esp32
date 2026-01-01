@@ -14,23 +14,24 @@ Web-based DYMO label printer controller for ESP32-S3 Super Mini, inspired by [la
 ## Hardware Requirements
 
 ### Minimum Setup
-- **ESP32-S3 Super Mini** development board
+- **ESP32-S3 Super Mini** development board (has built-in USB OTG!)
 - **DYMO Label Printer** (LabelManager PC, 280, 420P, or compatible)
-- **USB Host Shield** (MAX3421E) - Recommended for Arduino framework
-- **5V 2A Power Supply** (USB-C for ESP32)
+- **USB-C to USB-A OTG Adapter** (~$2)
+- **5V 2A Power Supply** (for ESP32 and printer)
 - **USB Cable** for DYMO printer
 
-### Alternative USB Connection Methods
+### USB Connection Methods
 
-1. **USB Host Shield** (Easiest - Recommended)
-   - Works with Arduino framework
-   - Well-supported libraries
-   - ~$10-15 additional cost
-
-2. **Native USB OTG** (Advanced)
+1. **Native USB OTG** (Recommended - No Shield Needed!)
+   - Uses built-in ESP32-S3 USB capability (GPIO19/GPIO20)
+   - Just needs USB-C OTG adapter (~$2)
+   - Smallest footprint, lowest cost
    - Requires ESP-IDF framework
-   - No additional hardware
-   - More complex implementation
+
+2. **USB Host Shield** (Arduino-Friendly Alternative)
+   - Works with Arduino framework
+   - Easier setup, more examples
+   - ~$10-15 additional cost
 
 See [Hardware Guide](docs/HARDWARE.md) for detailed wiring instructions.
 
