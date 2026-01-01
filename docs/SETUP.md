@@ -14,16 +14,111 @@
 3. **USB Cable** to connect printer to ESP32
 4. **Power Supply** for ESP32 (USB-C)
 
-### Wiring
+### ESP32-S3 Super Mini Pinout Overview
 
-The ESP32-S3 Super Mini has native USB support. Connect your DYMO printer to the ESP32 using:
+Based on the official pinout diagram, the board features:
 
-- USB Data+ (D+) → GPIO19
-- USB Data- (D-) → GPIO20
-- USB VCC → 5V
-- USB GND → GND
+- **11 GPIO pins**: GPIO1-GPIO21 (various)
+- **6 ADC pins**: A0-A5 for analog input
+- **I2C support**: Configurable on multiple GPIO pins
+- **SPI support**: Configurable pins with SPI interface
+- **UART support**: Multiple UART interfaces available
+- **PWM support**: 11 PWM-capable pins
+- **WS2812 RGB LED**: GPIO48
+- **USB-C**: Native USB support (GPIO19/GPIO20)
+- **Power**: BATTERY+, BATTERY-, BOOST, 5V, 3V3, GND
 
-> **Note**: Some DYMO printers may require a USB Host Shield or USB-OTG adapter.
+### Wiring Options
+
+The ESP32-S3 Super Mini supports multiple connection methods for the DYMO printer:
+
+#### Option 1: USB Host Mode (Recommended)
+
+The ESP32-S3 has native USB OTG support on GPIO19/GPIO20. Connect your DYMO printer:
+
+```
+DYMO Printer USB → USB OTG Adapter → ESP32-S3
+                                      ├─ GPIO19 (D-)
+                                      └─ GPIO20 (D+)
+```
+
+**Requirements:**
+- USB OTG cable or adapter
+- ESP-IDF USB Host library (requires additional configuration)
+- 5V power supply for the printer
+
+**Note**: USB Host mode requires ESP-IDF framework. Arduino framework support is limited. See "USB Host Implementation" section below.
+
+#### Option 2: USB-to-Serial Adapter (Alternative)
+
+For simpler implementation, use a USB-to-Serial adapter between the printer and ESP32:
+
+```
+DYMO Printer → USB-Serial Adapter → ESP32-S3
+                                     ├─ RX (any UART pin)
+                                     └─ TX (any UART pin)
+```
+
+**Example UART pin assignment:**
+- UART RX → GPIO44 (UART0 RX)
+- UART TX → GPIO43 (UART0 TX)
+- GND → GND
+
+#### Option 3: USB Host Shield (Easiest for Arduino)
+
+Use a MAX3421E USB Host Shield:
+
+```
+USB Host Shield → ESP32-S3 (SPI Interface)
+├─ MOSI → GPIO11 (SPI MOSI)
+├─ MISO → GPIO13 (SPI MISO)
+├─ SCK  → GPIO12 (SPI SCK)
+├─ CS   → GPIO10 (SPI CS)
+└─ GND  → GND
+```
+
+**Advantages:**
+- Works with Arduino framework
+- Well-supported libraries available
+- Easier to implement
+
+### USB Host Implementation Notes
+
+**Important**: The current implementation includes placeholder USB communication code. To fully support DYMO printer communication, you'll need to:
+
+1. **For ESP-IDF (Professional)**:
+   - Use ESP-IDF framework instead of Arduino
+   - Include USB Host library
+   - Implement USB device enumeration
+   - Handle USB bulk transfers
+
+2. **For Arduino (Easier)**:
+   - Use USB Host Shield with MAX3421E chip
+   - Install `USB Host Shield Library 2.0`
+   - Modify `DymoUSB.cpp` to use the shield
+
+3. **Serial Adapter Method (Simplest)**:
+   - Some DYMO printers support serial communication
+   - Use standard Arduino Serial library
+   - Requires firmware modification for serial protocol
+
+### Pin Recommendations
+
+**Safe GPIO pins for general use** (per ESP32-S3 Super Mini specs):
+- GPIO1, GPIO2, GPIO4-GPIO8
+- GPIO15-GPIO18
+- GPIO33-GPIO48 (avoid GPIO48 if using onboard LED)
+
+**Avoid these pins**:
+- GPIO26-GPIO32 (Reserved for flash/PSRAM on some variants)
+- GPIO0 (Boot mode selection)
+- GPIO46 (Boot mode selection)
+
+**Power Pins**:
+- 5V: Output from USB-C (max 500mA without boost)
+- 3V3: 3.3V regulated output
+- BATTERY+/BATTERY-: For LiPo battery connection
+- BOOST: Enable charging boost mode (up to 300mA)
 
 ## Software Setup
 
