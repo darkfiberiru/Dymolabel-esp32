@@ -9,6 +9,7 @@ Web-based DYMO label printer controller for ESP32-S3 Super Mini, inspired by [la
 - 🖨️ **DYMO Support**: Compatible with DYMO LabelManager series printers
 - 📝 **Multiple Content Types**: Text, QR codes, barcodes, and images
 - 🌐 **WiFi Enabled**: Access from any device on your network
+- 📲 **BLE Provisioning**: Easy WiFi setup via smartphone app (no hardcoded credentials!)
 
 ## Hardware Requirements
 
@@ -62,9 +63,9 @@ See [Hardware Guide](docs/HARDWARE.md) for detailed wiring instructions.
 git clone https://github.com/darkfiberiru/Dymolabel-esp32.git
 cd Dymolabel-esp32
 
-# Configure WiFi
+# Copy config file
 cp src/config.h.example src/config.h
-# Edit src/config.h with your WiFi credentials
+# (Optional) Edit src/config.h to customize device name or PoP
 
 # Build and upload
 pio run --target upload
@@ -73,7 +74,20 @@ pio run --target upload
 pio device monitor
 ```
 
-### 3. Access Web Interface
+### 3. WiFi Provisioning
+
+**First-time setup via smartphone:**
+
+1. Install "ESP BLE Provisioning" app (iOS/Android)
+2. Power on ESP32-S3
+3. Open app and scan for "Dymolabel-ESP32"
+4. Enter proof of possession: `dymolabel123` (default)
+5. Select your WiFi network and enter password
+6. Wait for connection success
+
+See [WiFi Provisioning Guide](docs/WIFI-PROVISIONING.md) for detailed instructions.
+
+### 4. Access Web Interface
 Navigate to:
 - `http://dymolabel.local` (mDNS)
 - Or use IP address shown in serial monitor
@@ -81,6 +95,7 @@ Navigate to:
 ## Documentation
 
 - 📖 [Setup Guide](docs/SETUP.md) - Detailed installation instructions
+- 📲 [WiFi Provisioning Guide](docs/WIFI-PROVISIONING.md) - BLE WiFi setup via smartphone
 - 🔧 [Hardware Guide](docs/HARDWARE.md) - Wiring diagrams and USB implementation
 - 🖨️ [Multi-Printer Setup](docs/MULTI-PRINTER.md) - Connect multiple printers via USB hub
 - 🔄 [USB Switch Guide](docs/USB-SWITCH.md) - Share printer between multiple hosts

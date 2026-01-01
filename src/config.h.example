@@ -1,9 +1,21 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-// WiFi Configuration
-#define WIFI_SSID "your-wifi-ssid"
-#define WIFI_PASSWORD "your-wifi-password"
+// WiFi Provisioning Configuration
+// Credentials are stored in NVS (Non-Volatile Storage) via BLE provisioning
+// Use the "ESP BLE Provisioning" app to configure WiFi
+
+// Device name shown during BLE provisioning
+#define WIFI_PROV_DEVICE_NAME "Dymolabel-ESP32"
+
+// Proof of Possession (PoP) for secure provisioning
+// Comment out WIFI_PROV_USE_POP to disable (less secure, easier setup)
+#define WIFI_PROV_USE_POP
+#define WIFI_PROV_POP "dymolabel123"
+
+// Uncomment to reset WiFi provisioning on every boot (for testing only)
+// WARNING: This will erase stored WiFi credentials on each reboot
+// #define WIFI_PROV_RESET_ON_BOOT
 
 // Hostname for mDNS
 #define HOSTNAME "dymolabel"
