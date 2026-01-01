@@ -1,6 +1,20 @@
-# USB Switch Compatibility Guide
+# USB Switch Compatibility Guide (Upstream Switching)
 
 ## Overview
+
+This guide covers **UPSTREAM USB switching** - sharing a single DYMO printer between multiple hosts (computer, ESP32, etc.).
+
+```
+Multiple Hosts → [USB Switch] → Single DYMO Printer
+├─ Computer
+└─ ESP32-S3
+```
+
+**Looking for something else?**
+- **Multiple printers on one ESP32?** See [Multi-Printer Guide](MULTI-PRINTER.md)
+- **Downstream USB hub?** See [Multi-Printer Guide](MULTI-PRINTER.md)
+
+---
 
 The Dymolabel ESP32 system can work with DYMO printers connected through USB switches, allowing you to share a single printer between multiple devices (computer, ESP32, etc.).
 

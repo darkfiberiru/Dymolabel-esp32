@@ -33,15 +33,21 @@ Web-based DYMO label printer controller for ESP32-S3 Super Mini, inspired by [la
 
 See [Hardware Guide](docs/HARDWARE.md) for detailed wiring instructions.
 
-### USB Switch Compatibility
+### USB Hub & Switch Compatibility
 
-✅ **Compatible** with USB switches and hubs:
+✅ **Downstream USB Hub** (Multiple printers on one ESP32):
+- Connect 2-4 DYMO printers via powered USB hub
+- Control multiple printers from single web interface
+- Ideal for high-volume or multi-location setups
+- See [Multi-Printer Guide](docs/MULTI-PRINTER.md)
+
+✅ **Upstream USB Switch** (Share one printer between devices):
 - Manual USB switches (button-operated)
 - USB sharing switches
 - KVM switches with USB pass-through
-- Powered USB hubs
+- See [USB Switch Guide](docs/USB-SWITCH.md)
 
-⚠️ **Note**: ESP32 needs exclusive access during printing. Auto-switching USB switches may cause conflicts.
+⚠️ **Note**: Upstream switching requires exclusive access during printing. Auto-switching USB switches may cause conflicts.
 
 ## Quick Start
 
@@ -76,6 +82,8 @@ Navigate to:
 
 - 📖 [Setup Guide](docs/SETUP.md) - Detailed installation instructions
 - 🔧 [Hardware Guide](docs/HARDWARE.md) - Wiring diagrams and USB implementation
+- 🖨️ [Multi-Printer Setup](docs/MULTI-PRINTER.md) - Connect multiple printers via USB hub
+- 🔄 [USB Switch Guide](docs/USB-SWITCH.md) - Share printer between multiple hosts
 - 📡 [API Documentation](docs/API.md) - REST API reference
 - 💡 [Examples](docs/EXAMPLES.md) - Code examples and integrations
 
