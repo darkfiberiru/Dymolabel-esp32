@@ -1,0 +1,21 @@
+#ifndef CONFIG_H
+#define CONFIG_H
+
+// WiFi Configuration
+#define WIFI_SSID "your-wifi-ssid"
+#define WIFI_PASSWORD "your-wifi-password"
+
+// Hostname for mDNS
+#define HOSTNAME "dymolabel"
+
+// Web Server Port
+#define WEB_SERVER_PORT 80
+
+// Printer Configuration
+#define DYMO_LABEL_WIDTH 64  // Label width in pixels (12mm tape = 64px)
+#define DYMO_MAX_LENGTH 1024 // Maximum label length in pixels
+
+// Debug
+#define DEBUG_SERIAL true
+
+#endif
