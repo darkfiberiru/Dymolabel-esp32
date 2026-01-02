@@ -45,6 +45,10 @@ private:
 DymoUSB::DymoUSB() : _connected(false), _printing(false),
                      _tapeWidth(DYMO_DEFAULT_TAPE_WIDTH), _dotTab(0) {
     _bytesPerLine = calculateBytesPerLine();
+
+    // Fix #12: Initialize mutex for thread-safe flag access
+    _stateMutex = xSemaphoreCreateMutex();
+
 #ifdef USE_ESP_IDF_USB_HOST
     _usbDevice = NULL;
     _usbClientHandle = NULL;
@@ -74,6 +78,12 @@ DymoUSB::~DymoUSB() {
         _transferCompleteSem = NULL;
     }
 #endif
+
+    // Fix #12: Delete state mutex
+    if (_stateMutex) {
+        vSemaphoreDelete(_stateMutex);
+        _stateMutex = NULL;
+    }
 }
 
 bool DymoUSB::begin() {
@@ -139,7 +149,12 @@ bool DymoUSB::begin() {
 
     // Request status to verify connection
     if (cmdStatus()) {
-        _connected = true;
+        // Fix #12: Thread-safe flag write
+        if (_stateMutex) {
+            xSemaphoreTake(_stateMutex, portMAX_DELAY);
+            _connected = true;
+            xSemaphoreGive(_stateMutex);
+        }
         #if DEBUG_SERIAL
         Serial.println("[DYMO] ✓ Printer initialized successfully");
         #endif
@@ -152,12 +167,22 @@ bool DymoUSB::begin() {
     #endif
 
     // Still return true to allow demo mode
-    _connected = true;
+    // Fix #12: Thread-safe flag write
+    if (_stateMutex) {
+        xSemaphoreTake(_stateMutex, portMAX_DELAY);
+        _connected = true;
+        xSemaphoreGive(_stateMutex);
+    }
     return true;
 }
 
 bool DymoUSB::isReady() {
-    return _connected && !_printing;
+    // Fix #12: Thread-safe flag access
+    if (!_stateMutex) return false;
+    xSemaphoreTake(_stateMutex, portMAX_DELAY);
+    bool ready = _connected && !_printing;
+    xSemaphoreGive(_stateMutex);
+    return ready;
 }
 
 // ============================================================================
@@ -223,21 +248,32 @@ bool DymoUSB::cmdSkipLines(uint16_t count) {
 // ============================================================================
 
 bool DymoUSB::printLabel(const uint8_t* imageData, int width, int height) {
-    if (!_connected) {
+    // Fix #12: Thread-safe flag checking
+    if (!_stateMutex) return false;
+
+    xSemaphoreTake(_stateMutex, portMAX_DELAY);
+    bool connected = _connected;
+    bool printing = _printing;
+    xSemaphoreGive(_stateMutex);
+
+    if (!connected) {
         #if DEBUG_SERIAL
         Serial.println("[DYMO] Printer not connected");
         #endif
         return false;
     }
 
-    if (_printing) {
+    if (printing) {
         #if DEBUG_SERIAL
         Serial.println("[DYMO] Printer busy");
         #endif
         return false;
     }
 
+    // Set printing flag
+    xSemaphoreTake(_stateMutex, portMAX_DELAY);
     _printing = true;
+    xSemaphoreGive(_stateMutex);
 
     #if DEBUG_SERIAL
     Serial.printf("[DYMO] Printing label: %dx%d pixels\n", width, height);
@@ -249,7 +285,11 @@ bool DymoUSB::printLabel(const uint8_t* imageData, int width, int height) {
     // Send image data using real protocol
     bool success = sendImage(rasterData.data(), width, height);
 
+    // Clear printing flag
+    xSemaphoreTake(_stateMutex, portMAX_DELAY);
     _printing = false;
+    xSemaphoreGive(_stateMutex);
+
     return success;
 }
 
@@ -258,6 +298,15 @@ bool DymoUSB::printText(const String& text, int fontSize, const String& align) {
     Serial.printf("[DYMO] Printing text: '%s' (size: %d, align: %s)\n",
                   text.c_str(), fontSize, align.c_str());
     #endif
+
+    // Fix #14: Validate input length
+    if (text.length() > DYMO_MAX_TEXT_LENGTH) {
+        #if DEBUG_SERIAL
+        Serial.printf("[DYMO] Text too long: %d chars (max %d)\n",
+                     text.length(), DYMO_MAX_TEXT_LENGTH);
+        #endif
+        return false;
+    }
 
     // Convert text to bitmap image
     std::vector<uint8_t> imageData = textToImage(text, fontSize, align);
@@ -297,6 +346,15 @@ bool DymoUSB::printQRCode(const String& data, int size) {
     Serial.printf("[DYMO] Printing QR code: '%s' (size: %d)\n", data.c_str(), size);
     #endif
 
+    // Fix #14: Validate input length
+    if (data.length() > DYMO_MAX_QR_DATA_LENGTH) {
+        #if DEBUG_SERIAL
+        Serial.printf("[DYMO] QR data too long: %d chars (max %d)\n",
+                     data.length(), DYMO_MAX_QR_DATA_LENGTH);
+        #endif
+        return false;
+    }
+
     // Generate QR code image
     std::vector<uint8_t> imageData = qrToImage(data, size);
 
@@ -333,6 +391,15 @@ bool DymoUSB::printBarcode(const String& data, const String& type) {
     #if DEBUG_SERIAL
     Serial.printf("[DYMO] Printing barcode: '%s' (type: %s)\n", data.c_str(), type.c_str());
     #endif
+
+    // Fix #14: Validate input length
+    if (data.length() > DYMO_MAX_BARCODE_LENGTH) {
+        #if DEBUG_SERIAL
+        Serial.printf("[DYMO] Barcode data too long: %d chars (max %d)\n",
+                     data.length(), DYMO_MAX_BARCODE_LENGTH);
+        #endif
+        return false;
+    }
 
     // Generate barcode image
     std::vector<uint8_t> imageData = barcodeToImage(data, type);
@@ -371,23 +438,43 @@ bool DymoUSB::feedLabel() {
 }
 
 void DymoUSB::reset() {
-    _connected = false;
-    _printing = false;
+    // Fix #12: Thread-safe flag write
+    if (_stateMutex) {
+        xSemaphoreTake(_stateMutex, portMAX_DELAY);
+        _connected = false;
+        _printing = false;
+        xSemaphoreGive(_stateMutex);
+    }
     begin();
 }
 
 String DymoUSB::getStatus() {
-    if (!_connected) {
+    // Fix #12: Thread-safe flag access
+    if (!_stateMutex) return "error";
+
+    xSemaphoreTake(_stateMutex, portMAX_DELAY);
+    bool connected = _connected;
+    bool printing = _printing;
+    xSemaphoreGive(_stateMutex);
+
+    if (!connected) {
         return "disconnected";
     }
-    if (_printing) {
+    if (printing) {
         return "printing";
     }
     return "ready";
 }
 
 bool DymoUSB::isPrinting() {
-    return _printing;
+    // Fix #12: Thread-safe flag access
+    if (!_stateMutex) return false;
+
+    xSemaphoreTake(_stateMutex, portMAX_DELAY);
+    bool printing = _printing;
+    xSemaphoreGive(_stateMutex);
+
+    return printing;
 }
 
 void DymoUSB::setTapeWidth(uint8_t widthMM) {
@@ -488,7 +575,7 @@ bool DymoUSB::sendCommand(const uint8_t* data, size_t length) {
     return true;
 #else
     // Simulation mode
-    delay(1);
+    delay(DYMO_SIM_COMMAND_DELAY_MS);  // Fix #13: Use named constant
     return true;
 #endif
 }
@@ -572,7 +659,7 @@ bool DymoUSB::sendCommandWithResponse(const uint8_t* data, size_t length,
     return true;
 #else
     // Simulation mode
-    delay(5);
+    delay(DYMO_SIM_RESPONSE_DELAY_MS);  // Fix #13: Use named constant
     if (response && responseLen >= 8) {
         memset(response, 0, responseLen);
         response[0] = 0x00;  // Status byte
@@ -615,7 +702,7 @@ bool DymoUSB::sendImage(const uint8_t* imageData, int width, int height) {
     Serial.println("[DYMO] ✓ Image sent successfully");
     #endif
 
-    delay(100);  // Simulate print time
+    delay(DYMO_PRINT_COMPLETE_DELAY_MS);  // Fix #13: Use named constant
     return true;
 }
 
@@ -897,7 +984,8 @@ uint8_t DymoUSB::calculateBytesPerLine() {
     // For 12mm: (12*8)/12 = 8 bytes
     // For 19mm: (19*8)/12 = 12.67 -> 13 bytes
 
-    return (_tapeWidth * 8) / 12;
+    // Fix #11: Use wider type for calculation to prevent integer overflow
+    return (uint8_t)((uint16_t)_tapeWidth * 8 / 12);
 }
 
 uint16_t DymoUSB::calculatePixelHeight() {
@@ -1107,7 +1195,7 @@ void DymoUSB::cleanupUSBHost() {
     // Stop USB Host task
     _usbHostLibTaskRunning = false;
     if (_usbHostTaskHandle) {
-        delay(100);  // Give task time to exit
+        delay(DYMO_USB_TASK_EXIT_DELAY_MS);  // Fix #13: Give task time to exit
         _usbHostTaskHandle = NULL;
     }
 
@@ -1123,7 +1211,12 @@ void DymoUSB::cleanupUSBHost() {
         _usbHostInitialized = false;
     }
 
-    _connected = false;
+    // Fix #12: Thread-safe flag write
+    if (_stateMutex) {
+        xSemaphoreTake(_stateMutex, portMAX_DELAY);
+        _connected = false;
+        xSemaphoreGive(_stateMutex);
+    }
 
     #if DEBUG_SERIAL
     Serial.println("[USB] USB Host cleanup complete");
@@ -1143,7 +1236,7 @@ bool DymoUSB::detectAndOpenPrinter() {
         return false;
     }
 
-    delay(100);  // Give time for enumeration
+    delay(DYMO_USB_ENUM_DELAY_MS);  // Fix #13: Give time for enumeration
 
     // Fix #7: Get device count first (parameter is buffer size, not max)
     uint8_t num_devices = 0;
@@ -1269,7 +1362,14 @@ bool DymoUSB::detectAndOpenPrinter() {
 
             // All checks passed - device is ready
             _usbDevice = dev_hdl;
-            _connected = true;
+
+            // Fix #12: Thread-safe flag write
+            if (_stateMutex) {
+                xSemaphoreTake(_stateMutex, portMAX_DELAY);
+                _connected = true;
+                xSemaphoreGive(_stateMutex);
+            }
+
             return true;
         } else {
             usb_host_device_close(_usbClientHandle, dev_hdl);
