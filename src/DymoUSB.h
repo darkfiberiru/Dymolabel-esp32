@@ -4,11 +4,10 @@
 #include <Arduino.h>
 #include <vector>
 
-// USB Host Shield Library
-// Uncomment when using USB Host Shield
-// #include <usbhid.h>
-// #include <hiduniversal.h>
-// #include <usbhub.h>
+// ESP-IDF USB Host Library (native ESP32-S3 USB OTG)
+#ifdef USE_ESP_IDF_USB_HOST
+#include "usb/usb_host.h"
+#endif
 
 // DYMO LabelManager PnP USB Device IDs
 #define DYMO_VENDOR_ID  0x0922
@@ -64,6 +63,14 @@ private:
     uint8_t _bytesPerLine;
     uint8_t _dotTab;  // Vertical offset (0-8)
 
+#ifdef USE_ESP_IDF_USB_HOST
+    // ESP-IDF USB Host members
+    usb_device_handle_t _usbDevice;
+    uint8_t _usbOutEndpoint;
+    uint8_t _usbInEndpoint;
+    bool _usbHostInitialized;
+#endif
+
     // DYMO Protocol Commands
     bool cmdStatus();
     bool cmdDotTab(uint8_t value);
@@ -78,9 +85,13 @@ private:
     bool sendCommandWithResponse(const uint8_t* data, size_t length, uint8_t* response, size_t responseLen);
     bool sendImage(const uint8_t* imageData, int width, int height);
 
-    // USB Host Shield methods (when using USB Host Shield)
-    // bool initUSBHost();
-    // bool detectPrinter();
+#ifdef USE_ESP_IDF_USB_HOST
+    // ESP-IDF USB Host methods
+    bool initUSBHost();
+    bool detectAndOpenPrinter();
+    static void usbHostLibTask(void* arg);
+    static void usbClientEventCallback(const usb_host_client_event_msg_t* event_msg, void* arg);
+#endif
 
     // Image processing
     std::vector<uint8_t> textToImage(const String& text, int fontSize, const String& align);

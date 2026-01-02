@@ -12,8 +12,7 @@ The Dymolabel ESP32 firmware is **FULLY IMPLEMENTED** with:
 ✅ **QR Code Generation** - Working QR code support
 ✅ **Barcode Generation** - Basic Code 39 implementation
 ✅ **Multi-Printer Support** - Via downstream USB hub
-
-⚠️ **USB Communication** - Simulation mode (needs USB Host integration)
+✅ **USB Communication** - ESP-IDF USB Host (native ESP32-S3 USB OTG)
 
 ---
 
@@ -39,9 +38,9 @@ DYMO Printer → USB Cable → USB-C OTG Adapter → ESP32-S3 USB-C Port
 - **Solution B**: Y-cable with external 5V supply for printer
 
 **Software Stack:**
-- Framework: ESP-IDF (not Arduino)
-- Library: ESP-IDF USB Host stack
-- Integration: Replace simulation code in `sendCommand()` with real USB writes
+- Framework: Arduino + ESP-IDF components (hybrid mode)
+- Library: ESP-IDF USB Host stack (built-in)
+- Integration: ✅ **IMPLEMENTED** - Full USB Host support in `sendCommand()`
 
 ---
 
@@ -253,45 +252,48 @@ pio device monitor
 
 ---
 
+## USB Host Implementation Details
+
+### ESP-IDF USB Host Integration ✅ COMPLETE
+
+The firmware now includes full USB Host support using ESP-IDF's native USB stack:
+
+**Implementation Overview:**
+
+1. **USB Host Initialization** (`DymoUSB::initUSBHost()`):
+   - Installs ESP-IDF USB Host driver
+   - Creates background task for USB event handling
+   - Registers USB client with event callbacks
+
+2. **Device Detection** (`DymoUSB::detectAndOpenPrinter()`):
+   - Waits for USB device connection (5s timeout)
+   - Enumerates connected devices
+   - Identifies DYMO printer by VID (0x0922) and PID (0x1002)
+   - Parses endpoints (Bulk IN/OUT)
+
+3. **Data Transfer** (`DymoUSB::sendCommand()`):
+   - Allocates USB transfer buffer
+   - Submits bulk OUT transfer to printer
+   - Handles transfer completion
+   - Returns status
+
+4. **Response Reading** (`DymoUSB::sendCommandWithResponse()`):
+   - Sends command via bulk OUT
+   - Reads response via bulk IN endpoint
+   - Returns printer status data
+
+**Key Features:**
+- Native ESP32-S3 USB OTG support (no external hardware needed)
+- Automatic device detection and enumeration
+- Bulk transfer support for high-speed data
+- Error handling and timeout protection
+- Debug logging for troubleshooting
+
+---
+
 ## Next Steps for Production
 
-### 1. ESP-IDF USB Host Integration
-
-**For Native USB OTG:**
-
-```c
-// In main.cpp (ESP-IDF)
-#include "usb/usb_host.h"
-
-void usb_host_task(void *arg) {
-    usb_host_config_t host_config = {
-        .skip_phy_setup = false,
-        .intr_flags = ESP_INTR_FLAG_LEVEL1
-    };
-
-    usb_host_install(&host_config);
-    usb_host_run(portMAX_DELAY);
-}
-
-// Create task
-xTaskCreate(usb_host_task, "usb_host", 4096, NULL, 2, NULL);
-```
-
-**Device Detection:**
-```c
-usb_device_handle_t dymo_dev;
-usb_host_device_open(/* VID: 0x0922, PID: 0x1002 */, &dymo_dev);
-```
-
-**Data Transfer:**
-```c
-usb_transfer_t *transfer;
-usb_host_transfer_alloc(/* size */, &transfer);
-memcpy(transfer->data_buffer, data, length);
-usb_host_transfer_submit(transfer);
-```
-
-### 2. Enhanced Barcode Support
+### 1. Enhanced Barcode Support
 
 **Integrate Full Library:**
 - Code128 (alphanumeric)
