@@ -13,14 +13,20 @@ public:
     MonoBitmap(uint16_t w, uint16_t h) : Adafruit_GFX(w, h) {
         _width = w;
         _height = h;
-        _buffer.resize((w / 8) * h, 0);
+        // Fix #5: Round up to nearest byte boundary to prevent buffer overflow
+        size_t bytesPerRow = (w + 7) / 8;  // Ceiling division
+        _buffer.resize(bytesPerRow * h, 0);
     }
 
     void drawPixel(int16_t x, int16_t y, uint16_t color) override {
         if (x < 0 || x >= _width || y < 0 || y >= _height) return;
 
-        int byteIndex = y * (_width / 8) + (x / 8);
+        size_t bytesPerRow = (_width + 7) / 8;
+        size_t byteIndex = y * bytesPerRow + (x / 8);
         int bitIndex = 7 - (x % 8);
+
+        // Bounds check to prevent buffer overflow
+        if (byteIndex >= _buffer.size()) return;
 
         if (color) {
             _buffer[byteIndex] |= (1 << bitIndex);
@@ -41,9 +47,32 @@ DymoUSB::DymoUSB() : _connected(false), _printing(false),
     _bytesPerLine = calculateBytesPerLine();
 #ifdef USE_ESP_IDF_USB_HOST
     _usbDevice = NULL;
+    _usbClientHandle = NULL;
     _usbOutEndpoint = 0;
     _usbInEndpoint = 0;
     _usbHostInitialized = false;
+
+    // Initialize instance members (Fix #3: moved from static)
+    _usbHostLibTaskRunning = false;
+    _usbHostReadySem = NULL;
+    _usbHostTaskHandle = NULL;
+
+    // Initialize transfer synchronization (Fix #1)
+    _transferCompleteSem = xSemaphoreCreateBinary();
+    _lastTransferStatus = ESP_OK;
+#endif
+}
+
+// Fix #2: Destructor for proper USB Host cleanup
+DymoUSB::~DymoUSB() {
+#ifdef USE_ESP_IDF_USB_HOST
+    cleanupUSBHost();
+
+    // Delete semaphores
+    if (_transferCompleteSem) {
+        vSemaphoreDelete(_transferCompleteSem);
+        _transferCompleteSem = NULL;
+    }
 #endif
 }
 
@@ -240,9 +269,24 @@ bool DymoUSB::printText(const String& text, int fontSize, const String& align) {
         return false;
     }
 
-    // Calculate image dimensions
+    // Fix #4: Validate dimensions BEFORE division to prevent divide-by-zero
     int imageWidth = calculatePixelHeight();  // Tape width in pixels
-    int imageHeight = imageData.size() / (imageWidth / 8);
+    if (imageWidth < 8) {
+        #if DEBUG_SERIAL
+        Serial.printf("[DYMO] Invalid tape width: %d pixels (minimum 8)\n", imageWidth);
+        #endif
+        return false;
+    }
+
+    int bytesPerLine = imageWidth / 8;
+    if (bytesPerLine == 0 || imageData.size() % bytesPerLine != 0) {
+        #if DEBUG_SERIAL
+        Serial.println("[DYMO] Image size mismatch");
+        #endif
+        return false;
+    }
+
+    int imageHeight = imageData.size() / bytesPerLine;
 
     // Print the image
     return printLabel(imageData.data(), imageWidth, imageHeight);
@@ -263,9 +307,24 @@ bool DymoUSB::printQRCode(const String& data, int size) {
         return false;
     }
 
-    // Calculate dimensions
+    // Fix #4: Validate dimensions
     int imageWidth = calculatePixelHeight();
-    int imageHeight = imageData.size() / (imageWidth / 8);
+    if (imageWidth < 8) {
+        #if DEBUG_SERIAL
+        Serial.printf("[DYMO] Invalid tape width: %d pixels (minimum 8)\n", imageWidth);
+        #endif
+        return false;
+    }
+
+    int bytesPerLine = imageWidth / 8;
+    if (bytesPerLine == 0 || imageData.size() % bytesPerLine != 0) {
+        #if DEBUG_SERIAL
+        Serial.println("[DYMO] Image size mismatch");
+        #endif
+        return false;
+    }
+
+    int imageHeight = imageData.size() / bytesPerLine;
 
     return printLabel(imageData.data(), imageWidth, imageHeight);
 }
@@ -285,8 +344,24 @@ bool DymoUSB::printBarcode(const String& data, const String& type) {
         return false;
     }
 
+    // Fix #4: Validate dimensions
     int imageWidth = calculatePixelHeight();
-    int imageHeight = imageData.size() / (imageWidth / 8);
+    if (imageWidth < 8) {
+        #if DEBUG_SERIAL
+        Serial.printf("[DYMO] Invalid tape width: %d pixels (minimum 8)\n", imageWidth);
+        #endif
+        return false;
+    }
+
+    int bytesPerLine = imageWidth / 8;
+    if (bytesPerLine == 0 || imageData.size() % bytesPerLine != 0) {
+        #if DEBUG_SERIAL
+        Serial.println("[DYMO] Image size mismatch");
+        #endif
+        return false;
+    }
+
+    int imageHeight = imageData.size() / bytesPerLine;
 
     return printLabel(imageData.data(), imageWidth, imageHeight);
 }
@@ -347,6 +422,7 @@ bool DymoUSB::sendCommand(const uint8_t* data, size_t length) {
     #endif
 
 #ifdef USE_ESP_IDF_USB_HOST
+    // Fix #1: Proper USB transfer synchronization with callback
     if (!_connected || !_usbDevice || _usbOutEndpoint == 0) {
         #if DEBUG_SERIAL
         Serial.println("[DYMO] USB not connected or endpoint not configured");
@@ -364,11 +440,11 @@ bool DymoUSB::sendCommand(const uint8_t* data, size_t length) {
         return false;
     }
 
-    // Setup transfer
+    // Setup transfer with callback
     transfer->device_handle = _usbDevice;
     transfer->bEndpointAddress = _usbOutEndpoint;
-    transfer->callback = NULL;  // Synchronous transfer
-    transfer->context = NULL;
+    transfer->callback = usbTransferCallback;  // Use callback for proper sync
+    transfer->context = this;                  // Pass instance pointer
     transfer->num_bytes = length;
     memcpy(transfer->data_buffer, data, length);
     transfer->timeout_ms = 1000;
@@ -383,9 +459,25 @@ bool DymoUSB::sendCommand(const uint8_t* data, size_t length) {
         return false;
     }
 
-    // Wait for transfer completion (blocking wait for synchronous transfer)
-    // In real implementation, you'd use a semaphore or event flag
-    delay(10);  // Give time for transfer
+    // Wait for completion properly using semaphore
+    bool completed = (xSemaphoreTake(_transferCompleteSem, pdMS_TO_TICKS(2000)) == pdTRUE);
+
+    if (!completed) {
+        #if DEBUG_SERIAL
+        Serial.println("[DYMO] Transfer timeout");
+        #endif
+        usb_host_transfer_free(transfer);
+        return false;
+    }
+
+    // Check transfer status
+    if (_lastTransferStatus != ESP_OK || transfer->status != USB_TRANSFER_STATUS_COMPLETED) {
+        #if DEBUG_SERIAL
+        Serial.printf("[DYMO] Transfer failed: status=%d\n", transfer->status);
+        #endif
+        usb_host_transfer_free(transfer);
+        return false;
+    }
 
     usb_host_transfer_free(transfer);
 
@@ -420,7 +512,7 @@ bool DymoUSB::sendCommandWithResponse(const uint8_t* data, size_t length,
         return true;  // No response expected
     }
 
-    // Allocate USB transfer for reading
+    // Fix #1: Proper USB transfer synchronization for IN transfers
     usb_transfer_t *transfer;
     esp_err_t err = usb_host_transfer_alloc(responseLen, 0, &transfer);
     if (err != ESP_OK) {
@@ -430,11 +522,11 @@ bool DymoUSB::sendCommandWithResponse(const uint8_t* data, size_t length,
         return false;
     }
 
-    // Setup transfer
+    // Setup transfer with callback
     transfer->device_handle = _usbDevice;
     transfer->bEndpointAddress = _usbInEndpoint;
-    transfer->callback = NULL;  // Synchronous transfer
-    transfer->context = NULL;
+    transfer->callback = usbTransferCallback;  // Use callback
+    transfer->context = this;                   // Pass instance
     transfer->num_bytes = responseLen;
     transfer->timeout_ms = 1000;
 
@@ -448,8 +540,25 @@ bool DymoUSB::sendCommandWithResponse(const uint8_t* data, size_t length,
         return false;
     }
 
-    // Wait for transfer completion
-    delay(50);  // Give time for transfer
+    // Wait for completion properly using semaphore
+    bool completed = (xSemaphoreTake(_transferCompleteSem, pdMS_TO_TICKS(2000)) == pdTRUE);
+
+    if (!completed) {
+        #if DEBUG_SERIAL
+        Serial.println("[DYMO] Transfer (IN) timeout");
+        #endif
+        usb_host_transfer_free(transfer);
+        return false;
+    }
+
+    // Check transfer status
+    if (_lastTransferStatus != ESP_OK || transfer->status != USB_TRANSFER_STATUS_COMPLETED) {
+        #if DEBUG_SERIAL
+        Serial.printf("[DYMO] Transfer (IN) failed: status=%d\n", transfer->status);
+        #endif
+        usb_host_transfer_free(transfer);
+        return false;
+    }
 
     // Copy response data
     if (transfer->actual_num_bytes > 0) {
@@ -802,17 +911,34 @@ uint16_t DymoUSB::calculatePixelHeight() {
 
 #ifdef USE_ESP_IDF_USB_HOST
 
-// Static variables for USB Host library task
-static bool s_usb_host_lib_task_running = false;
-static SemaphoreHandle_t s_usb_host_ready_sem = NULL;
+// Fix #1: USB Transfer callback for proper synchronization
+void DymoUSB::usbTransferCallback(usb_transfer_t* transfer) {
+    if (!transfer || !transfer->context) return;
+
+    DymoUSB* instance = (DymoUSB*)transfer->context;
+    instance->_lastTransferStatus = (transfer->status == USB_TRANSFER_STATUS_COMPLETED) ? ESP_OK : ESP_FAIL;
+
+    // Signal completion
+    if (instance->_transferCompleteSem) {
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        xSemaphoreGiveFromISR(instance->_transferCompleteSem, &xHigherPriorityTaskWoken);
+        if (xHigherPriorityTaskWoken) {
+            portYIELD_FROM_ISR();
+        }
+    }
+}
 
 // USB Host library task - required for USB Host operations
 void DymoUSB::usbHostLibTask(void* arg) {
+    if (!arg) return;
+    DymoUSB* instance = (DymoUSB*)arg;
+
     #if DEBUG_SERIAL
     Serial.println("[USB] USB Host library task started");
     #endif
 
-    while (s_usb_host_lib_task_running) {
+    // Fix #3: Use instance member instead of static
+    while (instance->_usbHostLibTaskRunning) {
         uint32_t event_flags;
         usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
 
@@ -837,6 +963,9 @@ void DymoUSB::usbHostLibTask(void* arg) {
 
 // USB Client event callback
 void DymoUSB::usbClientEventCallback(const usb_host_client_event_msg_t* event_msg, void* arg) {
+    if (!arg) return;
+    DymoUSB* instance = (DymoUSB*)arg;
+
     #if DEBUG_SERIAL
     Serial.printf("[USB] Client event: %d\n", event_msg->event);
     #endif
@@ -846,8 +975,9 @@ void DymoUSB::usbClientEventCallback(const usb_host_client_event_msg_t* event_ms
             #if DEBUG_SERIAL
             Serial.printf("[USB] New device detected: address %d\n", event_msg->new_dev.address);
             #endif
-            if (s_usb_host_ready_sem) {
-                xSemaphoreGive(s_usb_host_ready_sem);
+            // Fix #3: Use instance member instead of static
+            if (instance->_usbHostReadySem) {
+                xSemaphoreGive(instance->_usbHostReadySem);
             }
             break;
         case USB_HOST_CLIENT_EVENT_DEV_GONE:
@@ -869,9 +999,9 @@ bool DymoUSB::initUSBHost() {
     Serial.println("[USB] Initializing ESP-IDF USB Host...");
     #endif
 
-    // Create semaphore for USB device detection
-    s_usb_host_ready_sem = xSemaphoreCreateBinary();
-    if (!s_usb_host_ready_sem) {
+    // Fix #3: Create semaphore as instance member
+    _usbHostReadySem = xSemaphoreCreateBinary();
+    if (!_usbHostReadySem) {
         #if DEBUG_SERIAL
         Serial.println("[USB] Failed to create semaphore");
         #endif
@@ -889,8 +1019,8 @@ bool DymoUSB::initUSBHost() {
         #if DEBUG_SERIAL
         Serial.printf("[USB] USB Host install failed: %s\n", esp_err_to_name(err));
         #endif
-        vSemaphoreDelete(s_usb_host_ready_sem);
-        s_usb_host_ready_sem = NULL;
+        vSemaphoreDelete(_usbHostReadySem);
+        _usbHostReadySem = NULL;
         return false;
     }
 
@@ -898,16 +1028,16 @@ bool DymoUSB::initUSBHost() {
     Serial.println("[USB] USB Host driver installed");
     #endif
 
-    // Start USB Host library task
-    s_usb_host_lib_task_running = true;
+    // Fix #3: Start USB Host library task with instance pointer
+    _usbHostLibTaskRunning = true;
     BaseType_t task_created = xTaskCreatePinnedToCore(
         usbHostLibTask,
         "usb_host",
         4096,
-        NULL,
-        5,  // Priority
-        NULL,
-        0   // Core 0
+        this,  // Pass instance pointer to task
+        5,     // Priority
+        &_usbHostTaskHandle,  // Store task handle
+        0      // Core 0
     );
 
     if (task_created != pdPASS) {
@@ -915,8 +1045,8 @@ bool DymoUSB::initUSBHost() {
         Serial.println("[USB] Failed to create USB Host task");
         #endif
         usb_host_uninstall();
-        vSemaphoreDelete(s_usb_host_ready_sem);
-        s_usb_host_ready_sem = NULL;
+        vSemaphoreDelete(_usbHostReadySem);
+        _usbHostReadySem = NULL;
         return false;
     }
 
@@ -930,20 +1060,20 @@ bool DymoUSB::initUSBHost() {
         .max_num_event_msg = 5,
         .async = {
             .client_event_callback = usbClientEventCallback,
-            .callback_arg = this
+            .callback_arg = this  // Pass instance pointer to callback
         }
     };
 
-    usb_host_client_handle_t client_hdl;
-    err = usb_host_client_register(&client_config, &client_hdl);
+    // Fix #2: Store client handle in instance member
+    err = usb_host_client_register(&client_config, &_usbClientHandle);
     if (err != ESP_OK) {
         #if DEBUG_SERIAL
         Serial.printf("[USB] Client register failed: %s\n", esp_err_to_name(err));
         #endif
-        s_usb_host_lib_task_running = false;
+        _usbHostLibTaskRunning = false;
         usb_host_uninstall();
-        vSemaphoreDelete(s_usb_host_ready_sem);
-        s_usb_host_ready_sem = NULL;
+        vSemaphoreDelete(_usbHostReadySem);
+        _usbHostReadySem = NULL;
         return false;
     }
 
@@ -956,13 +1086,57 @@ bool DymoUSB::initUSBHost() {
     return true;
 }
 
+// Fix #2: Cleanup method for proper resource management
+void DymoUSB::cleanupUSBHost() {
+    #if DEBUG_SERIAL
+    Serial.println("[USB] Cleaning up USB Host resources...");
+    #endif
+
+    // Close device if open
+    if (_usbDevice) {
+        usb_host_device_close(_usbClientHandle, _usbDevice);
+        _usbDevice = NULL;
+    }
+
+    // Deregister client
+    if (_usbClientHandle) {
+        usb_host_client_deregister(_usbClientHandle);
+        _usbClientHandle = NULL;
+    }
+
+    // Stop USB Host task
+    _usbHostLibTaskRunning = false;
+    if (_usbHostTaskHandle) {
+        delay(100);  // Give task time to exit
+        _usbHostTaskHandle = NULL;
+    }
+
+    // Delete semaphore
+    if (_usbHostReadySem) {
+        vSemaphoreDelete(_usbHostReadySem);
+        _usbHostReadySem = NULL;
+    }
+
+    // Uninstall USB Host
+    if (_usbHostInitialized) {
+        usb_host_uninstall();
+        _usbHostInitialized = false;
+    }
+
+    _connected = false;
+
+    #if DEBUG_SERIAL
+    Serial.println("[USB] USB Host cleanup complete");
+    #endif
+}
+
 bool DymoUSB::detectAndOpenPrinter() {
     #if DEBUG_SERIAL
     Serial.println("[USB] Detecting DYMO printer...");
     #endif
 
-    // Wait for device detection (with timeout)
-    if (xSemaphoreTake(s_usb_host_ready_sem, pdMS_TO_TICKS(5000)) != pdTRUE) {
+    // Fix #3: Wait for device detection using instance member
+    if (xSemaphoreTake(_usbHostReadySem, pdMS_TO_TICKS(5000)) != pdTRUE) {
         #if DEBUG_SERIAL
         Serial.println("[USB] No device detected (timeout)");
         #endif
@@ -971,9 +1145,9 @@ bool DymoUSB::detectAndOpenPrinter() {
 
     delay(100);  // Give time for enumeration
 
-    // Get list of devices
-    uint8_t num_devices;
-    esp_err_t err = usb_host_device_addr_list_fill(1, &num_devices);
+    // Fix #7: Get device count first (parameter is buffer size, not max)
+    uint8_t num_devices = 0;
+    esp_err_t err = usb_host_device_addr_list_fill(0, &num_devices);
     if (err != ESP_OK || num_devices == 0) {
         #if DEBUG_SERIAL
         Serial.println("[USB] No USB devices found");
@@ -981,18 +1155,33 @@ bool DymoUSB::detectAndOpenPrinter() {
         return false;
     }
 
+    // Fix #7: Limit to reasonable maximum to prevent stack overflow
+    #define MAX_USB_DEVICES 16
+    if (num_devices > MAX_USB_DEVICES) {
+        #if DEBUG_SERIAL
+        Serial.printf("[USB] Too many devices: %d (max %d), truncating\n", num_devices, MAX_USB_DEVICES);
+        #endif
+        num_devices = MAX_USB_DEVICES;
+    }
+
     #if DEBUG_SERIAL
     Serial.printf("[USB] Found %d USB device(s)\n", num_devices);
     #endif
 
-    // Get device address
-    uint8_t dev_addr_list[num_devices];
-    usb_host_device_addr_list_fill(num_devices, &dev_addr_list[0]);
+    // Fix #7: Use fixed-size array instead of VLA
+    uint8_t dev_addr_list[MAX_USB_DEVICES];
+    err = usb_host_device_addr_list_fill(num_devices, dev_addr_list);
+    if (err != ESP_OK) {
+        #if DEBUG_SERIAL
+        Serial.println("[USB] Failed to get device addresses");
+        #endif
+        return false;
+    }
 
     // Try to open each device and check if it's a DYMO printer
     for (int i = 0; i < num_devices; i++) {
         usb_device_handle_t dev_hdl;
-        err = usb_host_device_open(NULL, dev_addr_list[i], &dev_hdl);
+        err = usb_host_device_open(_usbClientHandle, dev_addr_list[i], &dev_hdl);
         if (err != ESP_OK) {
             continue;
         }
@@ -1001,7 +1190,7 @@ bool DymoUSB::detectAndOpenPrinter() {
         const usb_device_desc_t *dev_desc;
         err = usb_host_get_device_descriptor(dev_hdl, &dev_desc);
         if (err != ESP_OK) {
-            usb_host_device_close(NULL, dev_hdl);
+            usb_host_device_close(_usbClientHandle, dev_hdl);
             continue;
         }
 
@@ -1018,18 +1207,28 @@ bool DymoUSB::detectAndOpenPrinter() {
             Serial.println("[USB] DYMO LabelManager PnP found!");
             #endif
 
-            _usbDevice = dev_hdl;
+            // Fix #6: Reset endpoints before parsing
+            _usbOutEndpoint = 0;
+            _usbInEndpoint = 0;
 
             // Get configuration descriptor to find endpoints
             const usb_config_desc_t *config_desc;
             err = usb_host_get_active_config_descriptor(dev_hdl, &config_desc);
             if (err == ESP_OK) {
-                // Parse configuration to find bulk endpoints
+                // Fix #10: Parse configuration with bounds checking
                 const usb_standard_desc_t *next_desc = (const usb_standard_desc_t *)config_desc;
                 size_t offset = 0;
 
                 while (offset < config_desc->wTotalLength) {
                     next_desc = (const usb_standard_desc_t *)(((uint8_t *)config_desc) + offset);
+
+                    // Fix #10: Validate descriptor length
+                    if (next_desc->bLength < 2 || offset + next_desc->bLength > config_desc->wTotalLength) {
+                        #if DEBUG_SERIAL
+                        Serial.println("[USB] Invalid descriptor length, stopping parse");
+                        #endif
+                        break;
+                    }
 
                     if (next_desc->bDescriptorType == USB_B_DESCRIPTOR_TYPE_ENDPOINT) {
                         const usb_ep_desc_t *ep_desc = (const usb_ep_desc_t *)next_desc;
@@ -1058,10 +1257,22 @@ bool DymoUSB::detectAndOpenPrinter() {
                 }
             }
 
+            // Fix #6: Verify endpoints were found before accepting device
+            if (_usbOutEndpoint == 0 || _usbInEndpoint == 0) {
+                #if DEBUG_SERIAL
+                Serial.printf("[USB] Required endpoints not found (OUT=0x%02X, IN=0x%02X)\n",
+                             _usbOutEndpoint, _usbInEndpoint);
+                #endif
+                usb_host_device_close(_usbClientHandle, dev_hdl);
+                continue;  // Try next device
+            }
+
+            // All checks passed - device is ready
+            _usbDevice = dev_hdl;
             _connected = true;
             return true;
         } else {
-            usb_host_device_close(NULL, dev_hdl);
+            usb_host_device_close(_usbClientHandle, dev_hdl);
         }
     }
 

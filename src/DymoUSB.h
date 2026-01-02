@@ -31,6 +31,7 @@
 class DymoUSB {
 public:
     DymoUSB();
+    ~DymoUSB();  // Destructor for proper cleanup
 
     // Initialize printer communication
     bool begin();
@@ -66,9 +67,19 @@ private:
 #ifdef USE_ESP_IDF_USB_HOST
     // ESP-IDF USB Host members
     usb_device_handle_t _usbDevice;
+    usb_host_client_handle_t _usbClientHandle;
     uint8_t _usbOutEndpoint;
     uint8_t _usbInEndpoint;
     bool _usbHostInitialized;
+
+    // Instance members (moved from static to support multiple instances)
+    bool _usbHostLibTaskRunning;
+    SemaphoreHandle_t _usbHostReadySem;
+    TaskHandle_t _usbHostTaskHandle;
+
+    // Transfer synchronization
+    SemaphoreHandle_t _transferCompleteSem;
+    volatile esp_err_t _lastTransferStatus;
 #endif
 
     // DYMO Protocol Commands
@@ -89,8 +100,10 @@ private:
     // ESP-IDF USB Host methods
     bool initUSBHost();
     bool detectAndOpenPrinter();
+    void cleanupUSBHost();
     static void usbHostLibTask(void* arg);
     static void usbClientEventCallback(const usb_host_client_event_msg_t* event_msg, void* arg);
+    static void usbTransferCallback(usb_transfer_t* transfer);
 #endif
 
     // Image processing
