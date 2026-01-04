@@ -1,5 +1,7 @@
 #include "WebServer.h"
 #include "config.h"
+#include "SerialLogger.h"
+#include <Update.h>
 
 // Web UI HTML (embedded)
 const char INDEX_HTML[] PROGMEM = R"rawliteral(
@@ -179,6 +181,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 <button class="tab" onclick="showTab('qr')">QR Code</button>
                 <button class="tab" onclick="showTab('barcode')">Barcode</button>
                 <button class="tab" onclick="showTab('api')">API</button>
+                <button class="tab" onclick="window.location.href='/console'">Console</button>
             </div>
 
             <!-- Text Tab -->
@@ -396,8 +399,256 @@ Content-Type: application/json
 </html>
 )rawliteral";
 
+// Console HTML (embedded)
+const char CONSOLE_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Serial Console - Dymolabel</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Courier New', monospace;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        .header {
+            background: #2d2d30;
+            padding: 15px;
+            border-bottom: 1px solid #3e3e42;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header h1 {
+            font-size: 1.2em;
+            color: #ffffff;
+        }
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #f87171;
+        }
+        .status-indicator.connected {
+            background: #4ade80;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+        }
+        button {
+            padding: 8px 15px;
+            background: #0e639c;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9em;
+        }
+        button:hover {
+            background: #1177bb;
+        }
+        #console {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        .log-entry {
+            margin-bottom: 2px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        .log-entry.error {
+            color: #f87171;
+        }
+        .log-entry.warning {
+            color: #fbbf24;
+        }
+        .log-entry.info {
+            color: #60a5fa;
+        }
+        .log-entry.success {
+            color: #4ade80;
+        }
+        ::-webkit-scrollbar {
+            width: 10px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #2d2d30;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #555;
+            border-radius: 5px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #777;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>📡 Serial Console</h1>
+        <div class="status">
+            <div class="status-indicator" id="statusIndicator"></div>
+            <span id="statusText">Connecting...</span>
+        </div>
+        <div class="controls">
+            <button onclick="clearConsole()">Clear</button>
+            <button onclick="toggleAutoScroll()" id="scrollBtn">Auto-scroll: ON</button>
+        </div>
+    </div>
+    <div id="console"></div>
+
+    <script>
+        let ws = null;
+        let autoScroll = true;
+        const consoleEl = document.getElementById('console');
+        const statusIndicator = document.getElementById('statusIndicator');
+        const statusText = document.getElementById('statusText');
+
+        function connect() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = () => {
+                statusIndicator.classList.add('connected');
+                statusText.textContent = 'Connected';
+                addLog('WebSocket connected', 'success');
+            };
+
+            ws.onclose = () => {
+                statusIndicator.classList.remove('connected');
+                statusText.textContent = 'Disconnected';
+                addLog('WebSocket disconnected. Reconnecting...', 'warning');
+                setTimeout(connect, 2000);
+            };
+
+            ws.onerror = (error) => {
+                addLog('WebSocket error', 'error');
+            };
+
+            ws.onmessage = (event) => {
+                addLog(event.data);
+            };
+        }
+
+        function addLog(message, type = '') {
+            const entry = document.createElement('div');
+            entry.className = 'log-entry' + (type ? ' ' + type : '');
+
+            // Add timestamp
+            const now = new Date();
+            const timestamp = `[${now.getHours().toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}:${now.getSeconds().toString().padStart(2, '0')}] `;
+            entry.textContent = timestamp + message;
+
+            consoleEl.appendChild(entry);
+
+            // Auto-scroll to bottom
+            if (autoScroll) {
+                consoleEl.scrollTop = consoleEl.scrollHeight;
+            }
+
+            // Limit console to 1000 lines
+            while (consoleEl.children.length > 1000) {
+                consoleEl.removeChild(consoleEl.firstChild);
+            }
+        }
+
+        function clearConsole() {
+            consoleEl.innerHTML = '';
+            addLog('Console cleared', 'info');
+        }
+
+        function toggleAutoScroll() {
+            autoScroll = !autoScroll;
+            document.getElementById('scrollBtn').textContent = `Auto-scroll: ${autoScroll ? 'ON' : 'OFF'}`;
+        }
+
+        // Connect on load
+        connect();
+    </script>
+</body>
+</html>
+)rawliteral";
+
+// Serial buffer implementation
+SerialBuffer::SerialBuffer() : _writeIndex(0), _count(0) {
+}
+
+void SerialBuffer::addMessage(const String& message) {
+    _buffer[_writeIndex] = message;
+    _writeIndex = (_writeIndex + 1) % SERIAL_BUFFER_SIZE;
+    if (_count < SERIAL_BUFFER_SIZE) {
+        _count++;
+    }
+}
+
+void SerialBuffer::sendHistoryTo(AsyncWebSocketClient* client) {
+    if (_count == 0) return;
+
+    // Calculate start index for circular buffer
+    int startIndex = (_count < SERIAL_BUFFER_SIZE) ? 0 : _writeIndex;
+
+    // Send messages in chronological order
+    for (int i = 0; i < _count; i++) {
+        int index = (startIndex + i) % SERIAL_BUFFER_SIZE;
+        client->text(_buffer[index]);
+    }
+}
+
+void SerialBuffer::broadcastToAll(AsyncWebSocket* ws) {
+    // This is handled per-message, not needed for now
+}
+
+String SerialBuffer::getLogsAsJson(int limit) {
+    if (_count == 0) {
+        return "[]";
+    }
+
+    // Limit to actual count
+    if (limit > _count) {
+        limit = _count;
+    }
+
+    JsonDocument doc;
+    JsonArray logs = doc.to<JsonArray>();
+
+    // Calculate start index for last N messages
+    int startOffset = _count - limit;
+    int startIndex = (_count < SERIAL_BUFFER_SIZE) ? startOffset : (_writeIndex + startOffset) % SERIAL_BUFFER_SIZE;
+
+    // Add messages in chronological order
+    for (int i = 0; i < limit; i++) {
+        int index = (startIndex + i) % SERIAL_BUFFER_SIZE;
+        logs.add(_buffer[index]);
+    }
+
+    String result;
+    serializeJson(doc, result);
+    return result;
+}
+
+// Static instance for logging
+LabelWebServer* LabelWebServer::_instance = nullptr;
+
 LabelWebServer::LabelWebServer(DymoUSB* printer)
-    : _server(WEB_SERVER_PORT), _printer(printer) {
+    : _server(WEB_SERVER_PORT), _ws("/ws"), _printer(printer) {
+    _instance = this;
 }
 
 bool LabelWebServer::begin() {
@@ -405,7 +656,8 @@ bool LabelWebServer::begin() {
     _server.begin();
 
     #if DEBUG_SERIAL
-    Serial.println("[WEB] Web server started on port " + String(WEB_SERVER_PORT));
+    ConsoleLog.println("[WEB] Web server started on port " + String(WEB_SERVER_PORT));
+    ConsoleLog.println("[WEB] OTA updates available at http://" + String(HOSTNAME) + ".local/update");
     #endif
 
     return true;
@@ -416,7 +668,56 @@ void LabelWebServer::handleClients() {
     // This method is kept for compatibility
 }
 
+void LabelWebServer::onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type,
+                               void *arg, uint8_t *data, size_t len) {
+    switch (type) {
+        case WS_EVT_CONNECT:
+            ConsoleLog.printf("[WS] Client #%u connected from %s\n", client->id(), client->remoteIP().toString().c_str());
+            // Send buffered history to new client
+            _serialBuffer.sendHistoryTo(client);
+            client->text("--- Live console output ---");
+            break;
+        case WS_EVT_DISCONNECT:
+            ConsoleLog.printf("[WS] Client #%u disconnected\n", client->id());
+            break;
+        case WS_EVT_DATA:
+            // Handle incoming data if needed
+            break;
+        case WS_EVT_PONG:
+        case WS_EVT_ERROR:
+            break;
+    }
+}
+
+void LabelWebServer::handleConsole(AsyncWebServerRequest *request) {
+    request->send_P(200, "text/html", CONSOLE_HTML);
+}
+
+void LabelWebServer::logToConsole(const String& message) {
+    if (_instance) {
+        // Add to buffer for history
+        _instance->_serialBuffer.addMessage(message);
+
+        // Broadcast to connected clients
+        if (_instance->_ws.count() > 0) {
+            _instance->_ws.textAll(message);
+        }
+    }
+}
+
 void LabelWebServer::setupRoutes() {
+    // WebSocket handler
+    _ws.onEvent([this](AsyncWebSocket *server, AsyncWebSocketClient *client, AwsEventType type,
+                       void *arg, uint8_t *data, size_t len) {
+        onWsEvent(server, client, type, arg, data, len);
+    });
+    _server.addHandler(&_ws);
+
+    // Console page
+    _server.on("/console", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        handleConsole(request);
+    });
+
     // Web UI
     _server.on("/", HTTP_GET, [this](AsyncWebServerRequest *request) {
         handleRoot(request);
@@ -431,67 +732,302 @@ void LabelWebServer::setupRoutes() {
         handleFeed(request);
     });
 
-    // Print endpoints with body handling
-    AsyncCallbackJsonWebHandler* printTextHandler = new AsyncCallbackJsonWebHandler("/api/print",
-        [this](AsyncWebServerRequest *request, JsonVariant &json) {
-            JsonObject jsonObj = json.as<JsonObject>();
+    // Printer diagnostics endpoints
+    _server.on("/api/printer/check", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        handlePrinterCheck(request);
+    });
 
-            if (!jsonObj.containsKey("text")) {
-                sendJsonResponse(request, 400, "Missing 'text' field", false);
-                return;
-            }
+    _server.on("/api/printer/reinit", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        handlePrinterReinit(request);
+    });
 
-            String text = jsonObj["text"].as<String>();
-            int fontSize = jsonObj.containsKey("fontSize") ? jsonObj["fontSize"].as<int>() : 12;
-            String align = jsonObj.containsKey("align") ? jsonObj["align"].as<String>() : "center";
+    // Logs endpoint
+    _server.on("/api/logs", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        handleLogs(request);
+    });
 
-            if (_printer->printText(text, fontSize, align)) {
-                sendJsonResponse(request, 200, "Label printed successfully");
-            } else {
-                sendJsonResponse(request, 500, "Failed to print label", false);
-            }
-        });
-    _server.addHandler(printTextHandler);
+    // Print text endpoint with body handling
+    _server.on("/api/print", HTTP_POST,
+        [this](AsyncWebServerRequest *request) {
+            // Response handled in body callback
+        },
+        NULL,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            if (index == 0) {
+                // First chunk - parse JSON
+                JsonDocument doc;
+                DeserializationError error = deserializeJson(doc, data, len);
 
-    AsyncCallbackJsonWebHandler* printQRHandler = new AsyncCallbackJsonWebHandler("/api/print/qr",
-        [this](AsyncWebServerRequest *request, JsonVariant &json) {
-            JsonObject jsonObj = json.as<JsonObject>();
+                if (error) {
+                    sendJsonResponse(request, 400, "Invalid JSON", false);
+                    return;
+                }
 
-            if (!jsonObj.containsKey("data")) {
-                sendJsonResponse(request, 400, "Missing 'data' field", false);
-                return;
-            }
+                if (doc["text"].isNull()) {
+                    sendJsonResponse(request, 400, "Missing 'text' field", false);
+                    return;
+                }
 
-            String data = jsonObj["data"].as<String>();
-            int size = jsonObj.containsKey("size") ? jsonObj["size"].as<int>() : 3;
+                String text = doc["text"].as<String>();
+                int fontSize = doc["fontSize"] | 12;
+                String align = doc["align"] | "center";
 
-            if (_printer->printQRCode(data, size)) {
-                sendJsonResponse(request, 200, "QR code printed successfully");
-            } else {
-                sendJsonResponse(request, 500, "Failed to print QR code", false);
-            }
-        });
-    _server.addHandler(printQRHandler);
-
-    AsyncCallbackJsonWebHandler* printBarcodeHandler = new AsyncCallbackJsonWebHandler("/api/print/barcode",
-        [this](AsyncWebServerRequest *request, JsonVariant &json) {
-            JsonObject jsonObj = json.as<JsonObject>();
-
-            if (!jsonObj.containsKey("data")) {
-                sendJsonResponse(request, 400, "Missing 'data' field", false);
-                return;
-            }
-
-            String data = jsonObj["data"].as<String>();
-            String type = jsonObj.containsKey("type") ? jsonObj["type"].as<String>() : "CODE128";
-
-            if (_printer->printBarcode(data, type)) {
-                sendJsonResponse(request, 200, "Barcode printed successfully");
-            } else {
-                sendJsonResponse(request, 500, "Failed to print barcode", false);
+                if (_printer->printText(text, fontSize, align)) {
+                    sendJsonResponse(request, 200, "Label printed successfully");
+                } else {
+                    sendJsonResponse(request, 500, "Failed to print label", false);
+                }
             }
         });
-    _server.addHandler(printBarcodeHandler);
+
+    // Print QR code endpoint with body handling
+    _server.on("/api/print/qr", HTTP_POST,
+        [this](AsyncWebServerRequest *request) {
+            // Response handled in body callback
+        },
+        NULL,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            if (index == 0) {
+                // First chunk - parse JSON
+                JsonDocument doc;
+                DeserializationError error = deserializeJson(doc, data, len);
+
+                if (error) {
+                    sendJsonResponse(request, 400, "Invalid JSON", false);
+                    return;
+                }
+
+                if (doc["data"].isNull()) {
+                    sendJsonResponse(request, 400, "Missing 'data' field", false);
+                    return;
+                }
+
+                String qrData = doc["data"].as<String>();
+                int size = doc["size"] | 3;
+
+                if (_printer->printQRCode(qrData, size)) {
+                    sendJsonResponse(request, 200, "QR code printed successfully");
+                } else {
+                    sendJsonResponse(request, 500, "Failed to print QR code", false);
+                }
+            }
+        });
+
+    // Print barcode endpoint with body handling
+    _server.on("/api/print/barcode", HTTP_POST,
+        [this](AsyncWebServerRequest *request) {
+            // Response handled in body callback
+        },
+        NULL,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            if (index == 0) {
+                // First chunk - parse JSON
+                JsonDocument doc;
+                DeserializationError error = deserializeJson(doc, data, len);
+
+                if (error) {
+                    sendJsonResponse(request, 400, "Invalid JSON", false);
+                    return;
+                }
+
+                if (doc["data"].isNull()) {
+                    sendJsonResponse(request, 400, "Missing 'data' field", false);
+                    return;
+                }
+
+                String barcodeData = doc["data"].as<String>();
+                String type = doc["type"] | "CODE128";
+
+                if (_printer->printBarcode(barcodeData, type)) {
+                    sendJsonResponse(request, 200, "Barcode printed successfully");
+                } else {
+                    sendJsonResponse(request, 500, "Failed to print barcode", false);
+                }
+            }
+        });
+
+    // OTA Update endpoint - serves upload page
+    _server.on("/update", HTTP_GET, [](AsyncWebServerRequest *request) {
+        const char* updateHTML = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Firmware Update - Dymolabel</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+        }
+        h1 { color: #667eea; margin-bottom: 10px; }
+        p { color: #666; margin-bottom: 30px; }
+        input[type="file"] {
+            width: 100%;
+            padding: 15px;
+            border: 2px dashed #667eea;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            cursor: pointer;
+        }
+        button {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        button:hover { transform: translateY(-2px); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        #progress {
+            width: 100%;
+            height: 30px;
+            margin-top: 20px;
+            display: none;
+        }
+        #status {
+            margin-top: 15px;
+            padding: 15px;
+            border-radius: 8px;
+            display: none;
+        }
+        .success { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        .info { background: #d1ecf1; color: #0c5460; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔄 Firmware Update</h1>
+        <p>Select a firmware.bin file to update</p>
+        <form id="uploadForm">
+            <input type="file" id="file" accept=".bin" required>
+            <button type="submit" id="uploadBtn">Upload Firmware</button>
+        </form>
+        <progress id="progress" value="0" max="100"></progress>
+        <div id="status"></div>
+    </div>
+    <script>
+        const form = document.getElementById('uploadForm');
+        const fileInput = document.getElementById('file');
+        const uploadBtn = document.getElementById('uploadBtn');
+        const progress = document.getElementById('progress');
+        const status = document.getElementById('status');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const file = fileInput.files[0];
+            if (!file) return;
+
+            uploadBtn.disabled = true;
+            progress.style.display = 'block';
+            showStatus('Uploading firmware...', 'info');
+
+            const formData = new FormData();
+            formData.append('firmware', file);
+
+            try {
+                const xhr = new XMLHttpRequest();
+                xhr.upload.addEventListener('progress', (e) => {
+                    if (e.lengthComputable) {
+                        const percent = (e.loaded / e.total) * 100;
+                        progress.value = percent;
+                    }
+                });
+
+                xhr.addEventListener('load', () => {
+                    if (xhr.status === 200) {
+                        showStatus('✓ Update successful! Rebooting...', 'success');
+                        setTimeout(() => {
+                            window.location.href = '/';
+                        }, 5000);
+                    } else {
+                        showStatus('✗ Update failed: ' + xhr.responseText, 'error');
+                        uploadBtn.disabled = false;
+                    }
+                });
+
+                xhr.addEventListener('error', () => {
+                    showStatus('✗ Upload failed', 'error');
+                    uploadBtn.disabled = false;
+                });
+
+                xhr.open('POST', '/update');
+                xhr.send(formData);
+            } catch (error) {
+                showStatus('✗ Error: ' + error.message, 'error');
+                uploadBtn.disabled = false;
+            }
+        });
+
+        function showStatus(msg, type) {
+            status.textContent = msg;
+            status.className = type;
+            status.style.display = 'block';
+        }
+    </script>
+</body>
+</html>
+)rawliteral";
+        request->send(200, "text/html", updateHTML);
+    });
+
+    // OTA Update endpoint - handles firmware upload
+    _server.on("/update", HTTP_POST,
+        [](AsyncWebServerRequest *request) {
+            // Handler called after upload completes
+            bool shouldReboot = !Update.hasError();
+            AsyncWebServerResponse *response = request->beginResponse(200, "text/plain",
+                shouldReboot ? "OK" : "FAIL");
+            response->addHeader("Connection", "close");
+            request->send(response);
+            if (shouldReboot) {
+                delay(100);
+                ESP.restart();
+            }
+        },
+        [](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
+            // File upload handler
+            if (!index) {
+                ConsoleLog.printf("[OTA] Update start: %s\n", filename.c_str());
+                if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+                    Update.printError(Serial);
+                }
+            }
+
+            if (len) {
+                if (Update.write(data, len) != len) {
+                    Update.printError(Serial);
+                }
+            }
+
+            if (final) {
+                if (Update.end(true)) {
+                    ConsoleLog.printf("[OTA] Update success: %u bytes\n", index + len);
+                } else {
+                    Update.printError(Serial);
+                }
+            }
+        });
 
     // 404 handler
     _server.onNotFound([this](AsyncWebServerRequest *request) {
@@ -524,6 +1060,57 @@ void LabelWebServer::handleFeed(AsyncWebServerRequest *request) {
     } else {
         sendJsonResponse(request, 500, "Failed to feed label", false);
     }
+}
+
+void LabelWebServer::handlePrinterCheck(AsyncWebServerRequest *request) {
+    JsonDocument doc;
+
+    doc["connected"] = _printer->isReady();
+    doc["status"] = _printer->getStatus();
+    doc["printing"] = _printer->isPrinting();
+    doc["tapeWidth"] = _printer->getTapeWidth();
+
+    // USB diagnostics
+    #ifdef USE_ESP_IDF_USB_HOST
+    doc["usbHostEnabled"] = true;
+    #else
+    doc["usbHostEnabled"] = false;
+    #endif
+
+    String response;
+    serializeJson(doc, response);
+    request->send(200, "application/json", response);
+}
+
+void LabelWebServer::handlePrinterReinit(AsyncWebServerRequest *request) {
+    ConsoleLog.println("[API] Attempting to reinitialize printer...");
+
+    // Reset and try to initialize again
+    _printer->reset();
+    delay(500);
+
+    bool success = _printer->begin();
+
+    if (success) {
+        ConsoleLog.println("[API] ✓ Printer reinitialized successfully");
+        sendJsonResponse(request, 200, "Printer reinitialized successfully");
+    } else {
+        ConsoleLog.println("[API] ✗ Printer reinitialization failed");
+        sendJsonResponse(request, 500, "Printer reinitialization failed", false);
+    }
+}
+
+void LabelWebServer::handleLogs(AsyncWebServerRequest *request) {
+    int limit = 50; // Default to last 50 logs
+
+    if (request->hasParam("limit")) {
+        limit = request->getParam("limit")->value().toInt();
+        if (limit < 1) limit = 1;
+        if (limit > SERIAL_BUFFER_SIZE) limit = SERIAL_BUFFER_SIZE;
+    }
+
+    String logsJson = _serialBuffer.getLogsAsJson(limit);
+    request->send(200, "application/json", logsJson);
 }
 
 void LabelWebServer::sendJsonResponse(AsyncWebServerRequest *request, int code, const String& message, bool success) {

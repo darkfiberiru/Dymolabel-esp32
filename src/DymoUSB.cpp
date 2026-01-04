@@ -1239,8 +1239,8 @@ bool DymoUSB::detectAndOpenPrinter() {
     delay(DYMO_USB_ENUM_DELAY_MS);  // Fix #13: Give time for enumeration
 
     // Fix #7: Get device count first (parameter is buffer size, not max)
-    uint8_t num_devices = 0;
-    esp_err_t err = usb_host_device_addr_list_fill(0, &num_devices);
+    int num_devices = 0;
+    esp_err_t err = usb_host_device_addr_list_fill(0, NULL, &num_devices);
     if (err != ESP_OK || num_devices == 0) {
         #if DEBUG_SERIAL
         Serial.println("[USB] No USB devices found");
@@ -1263,7 +1263,8 @@ bool DymoUSB::detectAndOpenPrinter() {
 
     // Fix #7: Use fixed-size array instead of VLA
     uint8_t dev_addr_list[MAX_USB_DEVICES];
-    err = usb_host_device_addr_list_fill(num_devices, dev_addr_list);
+    int num_devices_ret = 0;
+    err = usb_host_device_addr_list_fill(num_devices, dev_addr_list, &num_devices_ret);
     if (err != ESP_OK) {
         #if DEBUG_SERIAL
         Serial.println("[USB] Failed to get device addresses");
